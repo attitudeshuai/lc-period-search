@@ -132,13 +132,17 @@ def expect(data):
     df = 1.0 / (5.0 * span)
 
     best = None
+    grid = []
     steps = int(math.floor((f_max - f_min) / df)) + 1
     for i in range(steps + 1):
         f = f_min + i * df
         if f > f_max + 1e-12:
             break
         _, chi2 = _fit(pts, f, n_harm)
-        if chi2 is not None and (best is None or chi2 < best[0]):
+        if chi2 is None:
+            continue
+        grid.append((chi2, f))
+        if best is None or chi2 < best[0]:
             best = (chi2, f)
     f_star = best[1]
 
@@ -171,10 +175,20 @@ def expect(data):
     if phi < 0:
         phi += TWO_PI
     dof = len(keep) - (2 * n_harm + 1)
+    h = df / 10.0
+    c0 = _fit(keep, f_best, n_harm)[1]
+    c_plus = _fit(keep, f_best + h, n_harm)[1]
+    c_minus = _fit(keep, f_best - h, n_harm)[1]
+    curvature = (c_plus - 2.0 * c0 + c_minus) / (h * h)
+    sigma_f = math.sqrt(2.0 / curvature) if curvature > 0 else 0.0
+    others = [(c, f) for c, f in grid if abs(f - f_best) > 0.05 * f_best]
+    next_period = 1.0 / min(others)[1] if others else period
     return {"period": period, "epoch": (period * phi / TWO_PI) % period,
             "amplitude": math.hypot(coef[1], coef[2]), "chi2": chi2,
             "reduced": chi2 / dof, "n_used": len(keep), "dof": dof,
-            "coef": coef, "f": f_best}
+            "coef": coef, "f": f_best,
+            "sigma_period": period * period * sigma_f,
+            "next_period": next_period}
 
 
 # ---------------------------------------------------------------- 驱动被测程序
@@ -204,7 +218,8 @@ def run_case(data, cache_path=None):
 
 
 NEED = {"n_total", "n_used", "dof", "period_days", "epoch_days",
-        "amplitude_mmag", "chi2", "reduced_chi2"}
+        "amplitude_mmag", "period_uncertainty_days", "next_candidate_period_days",
+        "chi2", "reduced_chi2"}
 
 
 def _num(report, key):
@@ -354,6 +369,40 @@ def test_chi2_and_dof_contract():
         "chi2 与独立复算差得太多：被测 %r，独立复算 %r" % (chi2, exp["chi2"])
 
 
+def test_period_uncertainty_from_curvature():
+    """题面原文：「sigma_f = sqrt(2/c)、sigma_P = P²·sigma_f」。
+
+    曲率法给出的周期不确定度必须为正、与独立复算相差不超过 15%，且比周期小三四个量级。
+    """
+    data = make_curve(seed=1801)
+    exp = expect(data)
+    report, _ = run_case(data)
+    got = _num(report, "period_uncertainty_days")
+    period = _num(report, "period_days")
+    assert got > 0.0, "周期不确定度必须为正：%r" % got
+    assert got < 0.05 * period, "周期不确定度比周期本身还大：%r" % got
+    assert abs(got - exp["sigma_period"]) <= 0.15 * exp["sigma_period"], \
+        "周期不确定度与独立复算差得太多：被测 %r，独立复算 %r" % (got, exp["sigma_period"])
+
+
+def test_next_candidate_is_reported():
+    """题面原文：「取剩下的点里残差平方和最小的那个频率……用来判断这次定出的周期有没有被谐波或日周期缺测的假峰抢走」。
+
+    次优候选不能就是最优周期本身，而且要落在最优周期的整数倍或整数分之一上（谐波族），
+    说明程序确实在粗扫网格上找到了那条与主峰竞争的假峰。
+    """
+    data = make_curve(seed=1901)
+    report, _ = run_case(data)
+    got = _num(report, "next_candidate_period_days")
+    best = _num(report, "period_days")
+    assert got > 0.0, "次优候选周期必须为正：%r" % got
+    assert abs(got - best) > 0.01 * best, "次优候选就是最优周期本身：%r" % got
+    ratios = (0.25, 1.0 / 3.0, 0.5, 1.5, 2.0, 3.0, 4.0)
+    ratio = got / best
+    hit = [r for r in ratios if abs(ratio - r) <= 0.05 * r]
+    assert hit, "次优候选周期不在谐波族上：候选 %r / 最优 %r = %r" % (got, best, ratio)
+
+
 def test_invalid_data_rejected_without_output():
     """题面原文：「记录不合法时以退出码 2 结束、往 stderr 写原因、不产出报告」。
 
@@ -400,8 +449,9 @@ def test_report_schema_and_rounding():
     report, ctx = run_case(data)
     for key in NEED:
         assert key in report, "报告缺少字段 %s" % key
-    for key, digits in (("period_days", 5), ("epoch_days", 4), ("amplitude_mmag", 2),
-                        ("chi2", 2), ("reduced_chi2", 4)):
+    for key, digits in (("period_days", 5), ("period_uncertainty_days", 5),
+                        ("next_candidate_period_days", 5), ("epoch_days", 4),
+                        ("amplitude_mmag", 2), ("chi2", 2), ("reduced_chi2", 4)):
         v = _num(report, key)
         assert abs(v - round(v, digits)) <= 1e-12, "字段 %s 不是 %d 位小数：%r" % (key, digits, v)
     meta = report.get("meta")

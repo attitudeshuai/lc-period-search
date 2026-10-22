@@ -9,20 +9,22 @@ reward.txt 由 tests/test.sh 在确认 pytest 结构化报告非空之后再落�
 import os
 
 WEIGHTS = {
-    "test_period_matches_independent_search": 0.12,
+    "test_period_matches_independent_search": 0.11,
     "test_half_period_harmonic_rejected": 0.09,
-    "test_epoch_and_amplitude_match": 0.09,
-    "test_outliers_clipped_before_fit": 0.09,
-    "test_second_star_other_period": 0.08,
-    "test_long_period_near_low_frequency_edge": 0.09,
-    "test_chi2_and_dof_contract": 0.06,
-    "test_invalid_data_rejected_without_output": 0.09,
-    "test_report_schema_and_rounding": 0.06,
+    "test_epoch_and_amplitude_match": 0.08,
+    "test_outliers_clipped_before_fit": 0.08,
+    "test_second_star_other_period": 0.07,
+    "test_long_period_near_low_frequency_edge": 0.08,
+    "test_chi2_and_dof_contract": 0.05,
+    "test_period_uncertainty_from_curvature": 0.05,
+    "test_next_candidate_is_reported": 0.05,
+    "test_invalid_data_rejected_without_output": 0.08,
+    "test_report_schema_and_rounding": 0.05,
     "test_rerun_produces_identical_bytes": 0.05,
-    "test_failed_run_keeps_previous_report": 0.05,
-    "test_cache_reuse_and_append": 0.08,
+    "test_failed_run_keeps_previous_report": 0.04,
+    "test_cache_reuse_and_append": 0.06,
     "test_corrupt_cache_recovered": 0.04,
-    "test_failed_run_leaves_cache_untouched": 0.01,
+    "test_failed_run_leaves_cache_untouched": 0.02,
 }
 
 _RESULTS = {}

@@ -24,6 +24,8 @@
 4. 在最优频率上剔离群点：按标准化残差 `(dmag - 模型)/sigma` 判决，绝对值超过 `sigma_clip` 的整点剔除，然后重拟合；最多剔 `max_clip_iter` 轮。剔除后有效点少于 `min_used` 就按非法记录处理。
 5. 在最优频率 ±`df` 的范围内用黄金分割继续细化，取细化后的频率作为最终周期。
 6. 报告给出基波的极大时刻与半振幅：`epoch_days` 落在 `[0, P)`，`amplitude_mmag = sqrt(a1² + b1²)`（mmag）。
+7. 周期不确定度按残差平方和在最优频率附近的曲率估：取 `h = df/10`，曲率 `c = (chi2(f+h) - 2·chi2(f) + chi2(f-h)) / h²`，则 `sigma_f = sqrt(2/c)`、`sigma_P = P²·sigma_f`；曲率不是正数时按 0 记。
+8. 次优候选周期：在粗扫网格上排除最优频率 ±5% 的邻域，取剩下的点里残差平方和最小的那个频率，直接换成周期（不再细化）；网格里没有别的点时就等于最优周期。这一栏用来判断这次定出的周期有没有被谐波或日周期缺测的假峰抢走。
 
 ## 输出契约
 
@@ -37,6 +39,8 @@
   "period_days": 1.85315,
   "epoch_days": 0.0832,
   "amplitude_mmag": 42.01,
+  "period_uncertainty_days": 0.00044,
+  "next_candidate_period_days": 3.70258,
   "chi2": 411.8,
   "reduced_chi2": 1.0724,
   "meta": {"model": "harmonics-3", "unit": "HJD"}
@@ -45,7 +49,7 @@
 
 - `n_total` 是观测点总数，`n_used` 是剔除离群点后参与最终拟合的点数，`dof = n_used - (2·H + 1)`。
 - `chi2` 是加权残差平方和（在保留点、最终周期上算），`reduced_chi2 = chi2 / dof`。
-- `period_days` 保留五位小数；`epoch_days` 保留四位；`amplitude_mmag`、`chi2` 保留两位；`reduced_chi2` 保留四位。
+- `period_days`、`period_uncertainty_days`、`next_candidate_period_days` 保留五位小数；`epoch_days` 保留四位；`amplitude_mmag`、`chi2` 保留两位；`reduced_chi2` 保留四位。
 - `meta.model` 写成 `harmonics-` 接上本次的谐波阶数（本批为 `harmonics-3`），`meta.unit` 照抄记录里 `site.time_system`。数值必须有限，不允许出现 `NaN` 或 `Infinity`。
 
 ## 复核缓存

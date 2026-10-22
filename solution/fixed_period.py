@@ -183,13 +183,17 @@ def search_period(scan):
     df = 1.0 / (4.0 * span)
 
     best = None
+    grid = []
     steps = int(math.floor((scan["f_max"] - scan["f_min"]) / df)) + 1
     for i in range(steps + 1):
         f = scan["f_min"] + i * df
         if f > scan["f_max"] + 1e-12:
             break
         _, chi2 = fit_at(ts, ys, sigmas, f, n_harm)
-        if chi2 is not None and (best is None or chi2 < best[0]):
+        if chi2 is None:
+            continue
+        grid.append((chi2, f))
+        if best is None or chi2 < best[0]:
             best = (chi2, f)
     if best is None:
         _fail("周期搜索没找到可行解，检查 f_min / f_max")
@@ -228,8 +232,21 @@ def search_period(scan):
     coef, chi2 = fit_at(kt, ky, ks, f_best, n_harm)
     if coef is None:
         _fail("最终拟合解不出来，检查记录")
-    return {"f": f_best, "period": 1.0 / f_best, "coef": coef, "chi2": chi2,
-            "n_used": len(keep), "n_total": len(ts), "n_harm": n_harm}
+    h = df / 10.0
+    c0 = _chi2_only(kt, ky, ks, f_best, n_harm)
+    c_plus = _chi2_only(kt, ky, ks, f_best + h, n_harm)
+    c_minus = _chi2_only(kt, ky, ks, f_best - h, n_harm)
+    curvature = (c_plus - 2.0 * c0 + c_minus) / (h * h)
+    if curvature > 0:
+        sigma_f = math.sqrt(2.0 / curvature)
+    else:
+        sigma_f = 0.0
+    period = 1.0 / f_best
+    others = [(c, f) for c, f in grid if abs(f - f_best) > 0.05 * f_best]
+    next_period = 1.0 / min(others)[1] if others else period
+    return {"f": f_best, "period": period, "coef": coef, "chi2": chi2,
+            "n_used": len(keep), "n_total": len(ts), "n_harm": n_harm,
+            "sigma_period": period * period * sigma_f, "next_period": next_period}
 
 
 def build_report(scan, res):
@@ -250,6 +267,8 @@ def build_report(scan, res):
         "period_days": round(res["period"], 5),
         "epoch_days": round(epoch, 4),
         "amplitude_mmag": round(math.hypot(a1, b1), 2),
+        "period_uncertainty_days": round(res["sigma_period"], 5),
+        "next_candidate_period_days": round(res["next_period"], 5),
         "chi2": round(res["chi2"], 2),
         "reduced_chi2": round(res["chi2"] / dof, 4),
         "meta": {"model": "harmonics-%d" % res["n_harm"], "unit": scan["site"].get("time_system", "HJD")},
