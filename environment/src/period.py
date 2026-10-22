@@ -92,6 +92,7 @@ def main():
     ap = argparse.ArgumentParser(description="光变曲线周期搜索")
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--cache", default=None)
     args = ap.parse_args()
 
     raw = load(args.data)

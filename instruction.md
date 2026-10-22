@@ -9,7 +9,7 @@
 - 程序骨架已经在了，命令行入口固定：
 
   ```
-  python3 src/period.py --data 记录JSON路径 --out 报告JSON路径
+  python3 src/period.py --data 记录JSON路径 --out 报告JSON路径 --cache 缓存JSON路径
   ```
 
 - 记录结构：`samples` 每个点有 `t`（HJD，天）、`dmag`（差分星等，mmag）、`sigma`（这个点的不确定度，mmag，恒为正）；`site` 里写着望远镜、波段与时间系统；`fit` 里是本次复核的参数：`f_min`、`f_max`（频率搜索范围，1/天）、`n_harmonics`（谐波阶数）、`sigma_clip`（离群点阈值，按 sigma 的倍数）、`max_clip_iter`（最多剔几轮）、`min_used`（有效点下限）。
@@ -47,6 +47,17 @@
 - `chi2` 是加权残差平方和（在保留点、最终周期上算），`reduced_chi2 = chi2 / dof`。
 - `period_days` 保留五位小数；`epoch_days` 保留四位；`amplitude_mmag`、`chi2` 保留两位；`reduced_chi2` 保留四位。
 - `meta.model` 写成 `harmonics-` 接上本次的谐波阶数（本批为 `harmonics-3`），`meta.unit` 照抄记录里 `site.time_system`。数值必须有限，不允许出现 `NaN` 或 `Infinity`。
+
+## 复核缓存
+
+同一颗星在一次演练里会被反复复核，程序要把结果缓存下来，下一次跑同一份记录直接复用：
+
+- 缓存路径由 `--cache` 给出，内容是 UTF-8 的 JSON 对象：`{"version": 1, "entries": [{"key": 记录字节的 sha256, "report": 报告对象}, ...]}`。
+- `key` 取记录文件字节的 sha256，十六进制小写 64 位。
+- 一次运行收尾时：这个 `key` 已在缓存里就原地替换该条目的 `report`；不在就追加到末尾。其他条目一个字节都不要动、顺序不要变。
+- 缓存文件读不出来、不是合法 JSON 或结构不对：当作空缓存，照常算、照常产出报告，最后重写成一份合法缓存。
+- 记录不合法（退出码 2）时缓存文件一个字节都不许动；缓存路径写不进去也按非法记录处理。
+- 报告与缓存都先写临时文件再原子替换，不许留下半截文件。
 
 ## 运行与容错
 
