@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "gate_tests": [
+    "test_outputs.py::test_invalid_data_rejected_without_output"
+  ],
+  "tests": {
+    "test_outputs.py::test_period_matches_independent_search": {
+      "weight": 0.10752688172043011,
+      "rationale": "周期搜索、谐波拟合与剔点（period matches independent search）"
+    },
+    "test_outputs.py::test_half_period_harmonic_rejected": {
+      "weight": 0.08602150537634408,
+      "rationale": "test_half_period_harmonic_rejected"
+    },
+    "test_outputs.py::test_epoch_and_amplitude_match": {
+      "weight": 0.07526881720430108,
+      "rationale": "周期搜索、谐波拟合与剔点（epoch and amplitude match）"
+    },
+    "test_outputs.py::test_outliers_clipped_before_fit": {
+      "weight": 0.07526881720430108,
+      "rationale": "周期搜索、谐波拟合与剔点（outliers clipped before fit）"
+    },
+    "test_outputs.py::test_second_star_other_period": {
+      "weight": 0.06451612903225806,
+      "rationale": "周期搜索、谐波拟合与剔点（second star other period）"
+    },
+    "test_outputs.py::test_long_period_near_low_frequency_edge": {
+      "weight": 0.07526881720430108,
+      "rationale": "周期搜索、谐波拟合与剔点（long period near low frequency edge）"
+    },
+    "test_outputs.py::test_chi2_and_dof_contract": {
+      "weight": 0.053763440860215055,
+      "rationale": "周期搜索、谐波拟合与剔点（chi2 and dof contract）"
+    },
+    "test_outputs.py::test_period_uncertainty_from_curvature": {
+      "weight": 0.053763440860215055,
+      "rationale": "周期搜索、谐波拟合与剔点（period uncertainty from curvature）"
+    },
+    "test_outputs.py::test_next_candidate_is_reported": {
+      "weight": 0.053763440860215055,
+      "rationale": "周期搜索、谐波拟合与剔点（next candidate is reported）"
+    },
+    "test_outputs.py::test_report_schema_and_rounding": {
+      "weight": 0.053763440860215055,
+      "rationale": "周期搜索、谐波拟合与剔点（report schema and rounding）"
+    },
+    "test_outputs.py::test_rerun_produces_identical_bytes": {
+      "weight": 0.053763440860215055,
+      "rationale": "周期搜索、谐波拟合与剔点（rerun produces identical bytes）"
+    },
+    "test_outputs.py::test_failed_run_keeps_previous_report": {
+      "weight": 0.04301075268817204,
+      "rationale": "周期搜索、谐波拟合与剔点（failed run keeps previous report）"
+    },
+    "test_outputs.py::test_cache_reuse_and_append": {
+      "weight": 0.07526881720430108,
+      "rationale": "周期搜索、谐波拟合与剔点（cache reuse and append）"
+    },
+    "test_outputs.py::test_cache_capped_at_32_entries": {
+      "weight": 0.07526881720430108,
+      "rationale": "周期搜索、谐波拟合与剔点（cache capped at 32 entries）"
+    },
+    "test_outputs.py::test_corrupt_cache_recovered": {
+      "weight": 0.03225806451612903,
+      "rationale": "周期搜索、谐波拟合与剔点（corrupt cache recovered）"
+    },
+    "test_outputs.py::test_failed_run_leaves_cache_untouched": {
+      "weight": 0.02150537634408602,
+      "rationale": "周期搜索、谐波拟合与剔点（failed run leaves cache untouched）"
+    }
+  }
+}
