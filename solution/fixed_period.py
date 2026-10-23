@@ -96,6 +96,7 @@ def load_data(path):
         mags.append(y)
         sigmas.append(sig)
     return {"times": times, "mags": mags, "sigmas": sigmas,
+            "nights": [int(math.floor(t)) for t in times],
             "f_min": f_min, "f_max": f_max, "n_harm": int(n_harm),
             "clip": float(clip), "max_iter": int(max_iter),
             "min_used": int(min_used), "site": raw.get("site") or {}}
@@ -129,32 +130,76 @@ def _solve(a, b):
     return [m[i][n] for i in range(n)]
 
 
-def fit_at(ts, ys, sigmas, f, n_harm):
-    """给定频率做加权谐波最小二乘，返回系数与 chi2。"""
+def fit_at(ts, ys, sigmas, nights, f, n_harm):
+    """给定频率做加权谐波最小二乘，夜零点偏移一并解出来。
+
+    做法是「去夜均值」：每夜内把设计列与观测各自减去该夜的加权均值，常数项与零点偏移
+    一起被差掉，剩下的正规方程只解 2H 个谐波系数；再回填 c0（加权总均值）与每夜偏移
+    （该夜残差的加权均值，按构造对全部观测点的加权和为零）。
+    返回 (coef, c0, offsets, chi2)。
+    """
     npar = 2 * n_harm + 1
-    xtx = [[0.0] * npar for _ in range(npar)]
-    xty = [0.0] * npar
-    rows = []
-    for t, y, sig in zip(ts, ys, sigmas):
+    per = {}
+    for t, y, sig, night in zip(ts, ys, sigmas, nights):
         row = _design_row(t, f, n_harm)
-        rows.append(row)
         w = 1.0 / (sig * sig)
+        slot = per.get(night)
+        if slot is None:
+            slot = per[night] = {"sw": 0.0, "cols": [0.0] * npar, "sy": 0.0}
+        slot["sw"] += w
+        slot["sy"] += w * y
         for i in range(npar):
-            xty[i] += w * row[i] * y
-            for j in range(npar):
-                xtx[i][j] += w * row[i] * row[j]
-    coef = _solve(xtx, xty)
-    if coef is None:
-        return None, None
-    chi2 = 0.0
-    for row, y, sig in zip(rows, ys, sigmas):
+            slot["cols"][i] += w * row[i]
+
+    m = npar - 1
+    xtx = [[0.0] * m for _ in range(m)]
+    xty = [0.0] * m
+    rows = []
+    for t, y, sig, night in zip(ts, ys, sigmas, nights):
+        slot = per[night]
+        mean_cols = [v / slot["sw"] for v in slot["cols"]]
+        row = _design_row(t, f, n_harm)
+        rows.append((row, y, 1.0 / (sig * sig), night, mean_cols))
+    for row, y, w, night, mean_cols in rows:
+        x = [row[i + 1] - mean_cols[i + 1] for i in range(m)]
+        dy = y - per[night]["sy"] / per[night]["sw"]
+        for i in range(m):
+            xty[i] += w * x[i] * dy
+            for j in range(m):
+                xtx[i][j] += w * x[i] * x[j]
+    beta = _solve(xtx, xty)
+    if beta is None:
+        return None, None, None, None
+    coef = [0.0] + beta
+
+    sw_all = 0.0
+    acc = 0.0
+    residual = []
+    for row, y, w, night, mean_cols in rows:
         model = sum(c * r for c, r in zip(coef, row))
-        chi2 += ((y - model) / sig) ** 2
-    return coef, chi2
+        residual.append(y - model)
+        sw_all += w
+        acc += w * (y - model)
+    c0 = acc / sw_all if sw_all else 0.0
+
+    night_sum = {}
+    for (row, y, w, night, mean_cols), r in zip(rows, residual):
+        slot = night_sum.get(night)
+        if slot is None:
+            slot = night_sum[night] = [0.0, 0.0]
+        slot[0] += w * (r - c0)
+        slot[1] += w
+    offsets = {night: v[0] / v[1] for night, v in night_sum.items()}
+
+    chi2 = 0.0
+    for (row, y, w, night, mean_cols), r in zip(rows, residual):
+        d = r - c0 - offsets[night]
+        chi2 += w * d * d
+    return coef, c0, offsets, chi2
 
 
-def _chi2_only(ts, ys, sigmas, f, n_harm):
-    coef, chi2 = fit_at(ts, ys, sigmas, f, n_harm)
+def _chi2_only(ts, ys, sigmas, nights, f, n_harm):
+    _, _, _, chi2 = fit_at(ts, ys, sigmas, nights, f, n_harm)
     if chi2 is None:
         return float("inf")
     return chi2
@@ -182,6 +227,7 @@ def search_period(scan):
     ts = scan["times"]
     ys = scan["mags"]
     sigmas = scan["sigmas"]
+    nights = scan["nights"]
     n_harm = scan["n_harm"]
     span = max(ts) - min(ts)
     df = 1.0 / (4.0 * span)
@@ -193,7 +239,7 @@ def search_period(scan):
         f = scan["f_min"] + i * df
         if f > scan["f_max"] + 1e-12:
             break
-        _, chi2 = fit_at(ts, ys, sigmas, f, n_harm)
+        _, _, _, chi2 = fit_at(ts, ys, sigmas, nights, f, n_harm)
         if chi2 is None:
             continue
         grid.append((chi2, f))
@@ -208,14 +254,15 @@ def search_period(scan):
         kt = [ts[i] for i in keep]
         ky = [ys[i] for i in keep]
         ks = [sigmas[i] for i in keep]
-        coef, _ = fit_at(kt, ky, ks, f_star, n_harm)
+        kn = [nights[i] for i in keep]
+        coef, c0, offsets, _ = fit_at(kt, ky, ks, kn, f_star, n_harm)
         if coef is None:
             break
         drop = []
         for i in keep:
             row = _design_row(ts[i], f_star, n_harm)
             model = sum(c * r for c, r in zip(coef, row))
-            if abs((ys[i] - model) / sigmas[i]) > scan["clip"]:
+            if abs((ys[i] - c0 - offsets[nights[i]] - model) / sigmas[i]) > scan["clip"]:
                 drop.append(i)
         if not drop:
             break
@@ -227,20 +274,21 @@ def search_period(scan):
     kt = [ts[i] for i in keep]
     ky = [ys[i] for i in keep]
     ks = [sigmas[i] for i in keep]
+    kn = [nights[i] for i in keep]
     lo = max(scan["f_min"], f_star - df)
     hi = min(scan["f_max"], f_star + df)
     if hi <= lo:
         f_best = f_star
     else:
-        f_best = _golden(lambda x: _chi2_only(kt, ky, ks, x, n_harm), lo, hi)
-    coef, chi2 = fit_at(kt, ky, ks, f_best, n_harm)
+        f_best = _golden(lambda x: _chi2_only(kt, ky, ks, kn, x, n_harm), lo, hi)
+    coef, c0, offsets, chi2 = fit_at(kt, ky, ks, kn, f_best, n_harm)
     if coef is None:
         _fail("最终拟合解不出来，检查记录")
     h = df / 10.0
-    c0 = _chi2_only(kt, ky, ks, f_best, n_harm)
-    c_plus = _chi2_only(kt, ky, ks, f_best + h, n_harm)
-    c_minus = _chi2_only(kt, ky, ks, f_best - h, n_harm)
-    curvature = (c_plus - 2.0 * c0 + c_minus) / (h * h)
+    c0_chi = _chi2_only(kt, ky, ks, kn, f_best, n_harm)
+    c_plus = _chi2_only(kt, ky, ks, kn, f_best + h, n_harm)
+    c_minus = _chi2_only(kt, ky, ks, kn, f_best - h, n_harm)
+    curvature = (c_plus - 2.0 * c0_chi + c_minus) / (h * h)
     if curvature > 0:
         sigma_f = math.sqrt(2.0 / curvature)
     else:
@@ -248,14 +296,16 @@ def search_period(scan):
     period = 1.0 / f_best
     others = [(c, f) for c, f in grid if abs(f - f_best) > 0.05 * f_best]
     next_period = 1.0 / min(others)[1] if others else period
-    return {"f": f_best, "period": period, "coef": coef, "chi2": chi2,
-            "n_used": len(keep), "n_total": len(ts), "n_harm": n_harm, "keep": keep,
+    return {"f": f_best, "period": period, "coef": coef, "chi2": chi2, "c0": c0,
+            "offsets": offsets, "n_used": len(keep), "n_total": len(ts), "n_harm": n_harm,
+            "keep": keep, "nights_used": sorted(set(kn)),
             "sigma_period": period * period * sigma_f, "next_period": next_period}
 
 
 def build_report(scan, res):
     n_used = res["n_used"]
-    dof = n_used - (2 * res["n_harm"] + 1)
+    n_nights = len(res["nights_used"])
+    dof = n_used - (2 * res["n_harm"] + n_nights)
     if dof <= 0:
         _fail("有效点太少，自由度不够")
     a1 = res["coef"][1]
@@ -273,42 +323,29 @@ def build_report(scan, res):
         "amplitude_mmag": round(math.hypot(a1, b1), 2),
         "period_uncertainty_days": round(res["sigma_period"], 5),
         "next_candidate_period_days": round(res["next_period"], 5),
+        "night_offsets": [{"night": night, "offset_mmag": round(res["offsets"][night], 3)}
+                          for night in res["nights_used"]],
         "chi2": round(res["chi2"], 2),
         "reduced_chi2": round(res["chi2"] / dof, 4),
         "meta": {"model": "harmonics-%d" % res["n_harm"], "unit": scan["site"].get("time_system", "HJD")},
     }
 
 
-def _median(values):
-    """中位数：奇数个取中间那一个，偶数个取中间两个的平均。"""
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    n = len(ordered)
-    if n % 2:
-        return ordered[n // 2]
-    return 0.5 * (ordered[n // 2 - 1] + ordered[n // 2])
-
-
 def night_stats(scan, res):
-    """按夜号汇总本次记录：点数、保留点数、保留点标准化残差绝对值的中位数。"""
-    buckets = {}
-    for t in scan["times"]:
-        night = int(math.floor(t))
-        buckets.setdefault(night, {"points": 0, "resid": []})
-        buckets[night]["points"] += 1
+    """按夜号汇总本次记录：点数、保留点数、该夜的零点偏移估计。"""
+    points = {}
+    for night in scan["nights"]:
+        points[night] = points.get(night, 0) + 1
+    kept = {}
     for i in res["keep"]:
-        t = scan["times"][i]
-        night = int(math.floor(t))
-        row = _design_row(t, res["f"], res["n_harm"])
-        model = sum(c * r for c, r in zip(res["coef"], row))
-        buckets[night]["resid"].append(abs((scan["mags"][i] - model) / scan["sigmas"][i]))
+        night = scan["nights"][i]
+        kept[night] = kept.get(night, 0) + 1
     out = []
-    for night in sorted(buckets):
-        resid = buckets[night]["resid"]
-        out.append({"night": night, "points": buckets[night]["points"],
-                    "kept": len(resid),
-                    "resid_median_sigma": round(_median(resid), 3)})
+    for night in sorted(points):
+        out.append({"night": night,
+                    "points": points[night],
+                    "kept": kept.get(night, 0),
+                    "offset_mmag": round(res["offsets"].get(night, 0.0), 3)})
     return out
 
 
@@ -331,17 +368,17 @@ def load_ledger(path):
         night = e.get("night")
         points = e.get("points")
         kept = e.get("kept")
-        med = e.get("resid_median_sigma")
+        off = e.get("offset_mmag")
         if not isinstance(night, int) or isinstance(night, bool):
             continue
         if not isinstance(points, int) or isinstance(points, bool):
             continue
         if not isinstance(kept, int) or isinstance(kept, bool):
             continue
-        if not isinstance(med, (int, float)) or isinstance(med, bool):
+        if not isinstance(off, (int, float)) or isinstance(off, bool):
             continue
         out.append({"night": night, "points": points, "kept": kept,
-                    "resid_median_sigma": round(float(med), 3)})
+                    "offset_mmag": round(float(off), 3)})
     return out
 
 

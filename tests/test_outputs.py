@@ -27,8 +27,8 @@ class _Lcg(object):
 
 def make_curve(period=1.8539, span_days=120.0, n_nights=40, per_night=10,
                sigma=20.0, harmonics=((1, 42.0, 11.0), (2, -14.0, 7.0), (3, 5.0, -3.5)),
-               n_spikes=9, n_harm=3, seed=771003):
-    """造一条只按夜窗口采样、带宇宙线尖峰的变星光变曲线。"""
+               n_spikes=9, n_harm=3, night_offset=9.0, seed=771003):
+    """造一条只按夜窗口采样、带宇宙线尖峰与夜零点偏移的变星光变曲线。"""
     rng = _Lcg(seed)
     step = span_days / n_nights
     samples = []
@@ -40,6 +40,13 @@ def make_curve(period=1.8539, span_days=120.0, n_nights=40, per_night=10,
             m = sum(a * math.cos(k * th) + b * math.sin(k * th) for k, a, b in harmonics)
             m += (rng.next_u() + rng.next_u() - 1.0) * math.sqrt(6.0) * sigma
             samples.append({"t": t, "dmag": round(m, 3), "sigma": sigma})
+    # 每夜一个零点偏移（夜号取 floor(t)，与判分口径一致）
+    offsets = {}
+    for s in samples:
+        night = int(math.floor(s["t"]))
+        if night not in offsets:
+            offsets[night] = (rng.next_u() + rng.next_u() - 1.0) * math.sqrt(6.0) * night_offset
+        s["dmag"] = round(s["dmag"] + offsets[night], 3)
     for _ in range(n_spikes):
         idx = int(rng.next_u() * len(samples)) % len(samples)
         spike = (3.5 + 6.0 * rng.next_u()) * sigma
@@ -81,24 +88,62 @@ def _row(t, f, n_harm):
 
 
 def _fit(points, f, n_harm):
+    """去夜均值变换下的加权谐波最小二乘：返回 (coef, c0, offsets, chi2)。"""
     npar = 2 * n_harm + 1
-    xtx = [[0.0] * npar for _ in range(npar)]
-    xty = [0.0] * npar
+    per = {}
     for t, y, sig in points:
+        night = int(math.floor(t))
         row = _row(t, f, n_harm)
         w = 1.0 / (sig * sig)
+        slot = per.get(night)
+        if slot is None:
+            slot = per[night] = {"sw": 0.0, "cols": [0.0] * npar, "sy": 0.0}
+        slot["sw"] += w
+        slot["sy"] += w * y
         for i in range(npar):
-            xty[i] += w * row[i] * y
-            for j in range(npar):
-                xtx[i][j] += w * row[i] * row[j]
-    coef = _solve(xtx, xty)
-    if coef is None:
-        return None, None
-    chi2 = 0.0
+            slot["cols"][i] += w * row[i]
+    m = npar - 1
+    xtx = [[0.0] * m for _ in range(m)]
+    xty = [0.0] * m
+    rows = []
     for t, y, sig in points:
-        model = sum(c * r for c, r in zip(coef, _row(t, f, n_harm)))
-        chi2 += ((y - model) / sig) ** 2
-    return coef, chi2
+        night = int(math.floor(t))
+        slot = per[night]
+        mean_cols = [v / slot["sw"] for v in slot["cols"]]
+        rows.append((_row(t, f, n_harm), y, 1.0 / (sig * sig), night, mean_cols))
+    for row, y, w, night, mean_cols in rows:
+        x = [row[i + 1] - mean_cols[i + 1] for i in range(m)]
+        dy = y - per[night]["sy"] / per[night]["sw"]
+        for i in range(m):
+            xty[i] += w * x[i] * dy
+            for j in range(m):
+                xtx[i][j] += w * x[i] * x[j]
+    beta = _solve(xtx, xty)
+    if beta is None:
+        return None, None, None, None
+    coef = [0.0] + beta
+    sw_all = 0.0
+    acc = 0.0
+    resid = []
+    for row, y, w, night, mean_cols in rows:
+        model = sum(c * r for c, r in zip(coef, row))
+        resid.append(y - model)
+        sw_all += w
+        acc += w * (y - model)
+    c0 = acc / sw_all if sw_all else 0.0
+    night_sum = {}
+    for (row, y, w, night, mean_cols), r in zip(rows, resid):
+        slot = night_sum.get(night)
+        if slot is None:
+            slot = night_sum[night] = [0.0, 0.0]
+        slot[0] += w * (r - c0)
+        slot[1] += w
+    offsets = {night: v[0] / v[1] for night, v in night_sum.items()}
+    chi2 = 0.0
+    for (row, y, w, night, mean_cols), r in zip(rows, resid):
+        d = r - c0 - offsets[night]
+        chi2 += w * d * d
+    return coef, c0, offsets, chi2
 
 
 def _golden(fn, lo, hi, iters=80):
@@ -138,7 +183,7 @@ def expect(data):
         f = f_min + i * df
         if f > f_max + 1e-12:
             break
-        _, chi2 = _fit(pts, f, n_harm)
+        _, _, _, chi2 = _fit(pts, f, n_harm)
         if chi2 is None:
             continue
         grid.append((chi2, f))
@@ -148,14 +193,15 @@ def expect(data):
 
     keep = list(pts)
     for _ in range(max_iter):
-        coef, _ = _fit(keep, f_star, n_harm)
+        coef, c0, offsets, _ = _fit(keep, f_star, n_harm)
         if coef is None:
             break
         left = []
         dropped = False
         for t, y, sig in keep:
+            night = int(math.floor(t))
             model = sum(c * r for c, r in zip(coef, _row(t, f_star, n_harm)))
-            if abs((y - model) / sig) > clip:
+            if abs((y - c0 - offsets[night] - model) / sig) > clip:
                 dropped = True
             else:
                 left.append((t, y, sig))
@@ -166,58 +212,47 @@ def expect(data):
     lo = max(f_min, f_star - df)
     hi = min(f_max, f_star + df)
     if hi > lo:
-        f_best = _golden(lambda x: _fit(keep, x, n_harm)[1], lo, hi)
+        f_best = _golden(lambda x: _fit(keep, x, n_harm)[3], lo, hi)
     else:
         f_best = f_star
-    coef, chi2 = _fit(keep, f_best, n_harm)
+    coef, c0, offsets, chi2 = _fit(keep, f_best, n_harm)
     period = 1.0 / f_best
     phi = math.atan2(coef[2], coef[1])
     if phi < 0:
         phi += TWO_PI
-    dof = len(keep) - (2 * n_harm + 1)
+    nights = sorted({int(math.floor(p[0])) for p in keep})
+    dof = len(keep) - (2 * n_harm + len(nights))
     h = df / 10.0
-    c0 = _fit(keep, f_best, n_harm)[1]
-    c_plus = _fit(keep, f_best + h, n_harm)[1]
-    c_minus = _fit(keep, f_best - h, n_harm)[1]
-    curvature = (c_plus - 2.0 * c0 + c_minus) / (h * h)
+    c_centre = _fit(keep, f_best, n_harm)[3]
+    c_plus = _fit(keep, f_best + h, n_harm)[3]
+    c_minus = _fit(keep, f_best - h, n_harm)[3]
+    curvature = (c_plus - 2.0 * c_centre + c_minus) / (h * h)
     sigma_f = math.sqrt(2.0 / curvature) if curvature > 0 else 0.0
     others = [(c, f) for c, f in grid if abs(f - f_best) > 0.05 * f_best]
     next_period = 1.0 / min(others)[1] if others else period
     return {"period": period, "epoch": (period * phi / TWO_PI) % period,
             "amplitude": math.hypot(coef[1], coef[2]), "chi2": chi2,
             "reduced": chi2 / dof, "n_used": len(keep), "dof": dof,
-            "coef": coef, "f": f_best, "keep": keep,
+            "coef": coef, "f": f_best, "keep": keep, "c0": c0,
+            "offsets": offsets, "nights": nights,
             "sigma_period": period * period * sigma_f,
             "next_period": next_period}
 
 
-def _median(values):
-    ordered = sorted(values)
-    n = len(ordered)
-    if not n:
-        return 0.0
-    if n % 2:
-        return ordered[n // 2]
-    return 0.5 * (ordered[n // 2 - 1] + ordered[n // 2])
-
-
 def expect_ledger(data, exp):
-    """按独立复算的最优频率与保留点集，逐夜算点数 / 保留点数 / 标准化残差绝对值中位数。"""
-    n_harm = int(data["fit"]["n_harmonics"])
+    """按独立复算的保留点集，逐夜算点数 / 保留点数 / 该夜的零点偏移。"""
     per = {}
     for s in data["samples"]:
         night = int(math.floor(float(s["t"])))
-        per.setdefault(night, {"points": 0, "resid": []})
+        per.setdefault(night, {"points": 0, "kept": 0})
         per[night]["points"] += 1
     for t, y, sig in exp["keep"]:
         night = int(math.floor(t))
-        row = _row(t, exp["f"], n_harm)
-        model = sum(c * r for c, r in zip(exp["coef"], row))
-        per[night]["resid"].append(abs((y - model) / sig))
+        per[night]["kept"] += 1
     out = {}
     for night, slot in per.items():
-        out[night] = {"points": slot["points"], "kept": len(slot["resid"]),
-                      "resid_median_sigma": _median(slot["resid"])}
+        out[night] = {"points": slot["points"], "kept": slot["kept"],
+                      "offset_mmag": exp["offsets"].get(night, 0.0)}
     return out
 
 
@@ -229,6 +264,12 @@ def _shift(data, offset):
 
 
 # ---------------------------------------------------------------- 驱动被测程序
+def _report_nights(report):
+    rows = report.get("night_offsets")
+    assert isinstance(rows, list), "night_offsets 不是列表：%r" % (rows,)
+    return rows
+
+
 def _run(path, out_path, ledger_path=None, timeout=240):
     cmd = [sys.executable, ENTRY, "--data", path, "--out", out_path]
     if ledger_path is not None:
@@ -254,7 +295,7 @@ def run_case(data, ledger_path=None):
     return report, {"data": dpath, "out": opath, "proc": proc, "dir": tmp}
 
 
-NEED = {"n_total", "n_used", "dof", "period_days", "epoch_days",
+NEED = {"n_total", "n_used", "dof", "period_days", "epoch_days", "night_offsets",
         "amplitude_mmag", "period_uncertainty_days", "next_candidate_period_days",
         "chi2", "reduced_chi2"}
 
@@ -369,21 +410,28 @@ def test_second_star_other_period():
         "换星后有效点数不对：被测 %r，独立复算 %r" % (n_used, exp["n_used"])
 
 
-def test_long_period_near_low_frequency_edge():
-    """题面原文：「逐步加大，扫到」——长周期星的频率贴着下边界。
+def test_frequency_window_edge_reached():
+    """题面原文：「取加权残差平方和最小的频率」——最优解落在窗口边界上时也要取到。
 
-    周期 48 天（频率 0.0208，只比 f_min=0.02 高半个粗步长）：频率搜索不能跳过边界点，
-    周期要落在独立复算 0.5% 以内。
+    真实周期 1.2 天（频率 0.833）在 [0.02, 0.60] 的窗口外：窗口内的最优点就是 f_max，
+    报出来的周期要贴着 1/0.60，不能被扫到窗口外去。
     """
-    data = make_curve(period=48.0, span_days=120.0, n_nights=40, per_night=10,
-                      sigma=10.0, harmonics=((1, 25.0, 12.0), (2, -6.0, 3.0)),
-                      n_spikes=0, n_harm=2, seed=607)
+    data = make_curve(period=1.2, span_days=120.0, n_nights=40, per_night=10,
+                      sigma=8.0, harmonics=((1, 30.0, 10.0),),
+                      n_spikes=7, n_harm=1, seed=607)
+    data["fit"]["f_max"] = 0.60
     report, _ = run_case(data)
     exp = expect(data)
     got = _num(report, "period_days")
-    assert abs(got - exp["period"]) <= 0.005 * exp["period"], \
-        "贴边界的周期偏了：被测 %r，独立复算 %r" % (got, exp["period"])
-    assert got > 1.0 / data["fit"]["f_max"], "周期越过了频率上边界"
+    assert abs(got - exp["period"]) <= 0.002 * exp["period"], \
+        "贴窗口边界的周期偏了：被测 %r，独立复算 %r" % (got, exp["period"])
+    assert abs(got - 1.2) > 0.05, \
+        "频率扫到了窗口外：报出了窗口外的真周期 %r" % (got,)
+    assert got * data["fit"]["f_max"] >= 1.0 - 1e-6, \
+        "报出的周期对应的频率超过了 f_max：周期 %r，窗口上限频率 %r" % (got, data["fit"]["f_max"])
+    n_used = int(_num(report, "n_used"))
+    assert abs(n_used - exp["n_used"]) <= 1, \
+        "窗口边界用例的有效点数不对（尖峰没剔）：被测 %r，独立复算 %r" % (n_used, exp["n_used"])
 
 
 def test_chi2_and_dof_contract():
@@ -397,9 +445,11 @@ def test_chi2_and_dof_contract():
     report, _ = run_case(data)
     n_used = int(_num(report, "n_used"))
     dof = int(_num(report, "dof"))
+    n_nights = len(_report_nights(report))
     chi2 = _num(report, "chi2")
     red = _num(report, "reduced_chi2")
-    assert dof == n_used - 7, "dof 应等于 n_used - 7：n_used=%r dof=%r" % (n_used, dof)
+    assert dof == n_used - (6 + n_nights), \
+        "dof 应为 n_used - (2H + 夜数)：n_used=%r 夜数=%r dof=%r" % (n_used, n_nights, dof)
     assert abs(red - chi2 / dof) <= 0.001 * (chi2 / dof), \
         "reduced_chi2 与 chi2/dof 不一致：%r 对 %r" % (red, chi2 / dof)
     assert abs(chi2 - exp["chi2"]) <= 0.05 * exp["chi2"], \
@@ -566,7 +616,7 @@ def test_ledger_records_every_night_sorted():
     wrong_points = [r["night"] for r in rows if r["points"] != want[r["night"]]["points"]]
     assert not wrong_points, "这些夜的点数不对：%r" % (wrong_points,)
     bad_median = [r["night"] for r in rows
-                  if abs(float(r["resid_median_sigma"]) - want[r["night"]]["resid_median_sigma"]) > 0.25]
+                  if abs(float(r["offset_mmag"]) - want[r["night"]]["offset_mmag"]) > 2.0]
     assert not bad_median, "这些夜的标准化残差中位数对不上：%r" % (bad_median,)
 
 
@@ -583,8 +633,8 @@ def test_ledger_replaces_matching_night_in_place():
     hit = nights[len(nights) // 2]
     foreign = min(nights) - 7
     seeded = [
-        {"night": foreign, "points": 11, "kept": 9, "resid_median_sigma": 0.5},
-        {"night": hit, "points": 1, "kept": 0, "resid_median_sigma": 9.999},
+        {"night": foreign, "points": 11, "kept": 9, "offset_mmag": 0.5},
+        {"night": hit, "points": 1, "kept": 0, "offset_mmag": 9.999},
     ]
     ledger = os.path.join(tempfile.mkdtemp(prefix="lc-ledger-merge-"), "ledger.json")
     with open(ledger, "w", encoding="utf-8") as f:
@@ -600,7 +650,7 @@ def test_ledger_replaces_matching_night_in_place():
     hit_row = [r for r in rows if r["night"] == hit][0]
     assert hit_row["points"] == want[hit]["points"], "命中的夜没被本次统计替换：%r" % (hit_row,)
     assert hit_row["kept"] == want[hit]["kept"], "命中那行的保留点数不对：%r" % (hit_row,)
-    assert abs(float(hit_row["resid_median_sigma"]) - want[hit]["resid_median_sigma"]) <= 0.25, \
+    assert abs(float(hit_row["offset_mmag"]) - want[hit]["offset_mmag"]) <= 2.0, \
         "命中那行的标准化残差中位数不对：%r" % (hit_row,)
 
 
@@ -614,7 +664,7 @@ def test_ledger_capped_at_64_nights():
     exp = expect(data)
     want = expect_ledger(data, exp)
     new_nights = sorted(want)
-    old = [{"night": i + 1, "points": 5, "kept": 5, "resid_median_sigma": 1.0} for i in range(64)]
+    old = [{"night": i + 1, "points": 5, "kept": 5, "offset_mmag": 1.0} for i in range(64)]
     ledger = os.path.join(tempfile.mkdtemp(prefix="lc-ledger-cap-"), "ledger.json")
     with open(ledger, "w", encoding="utf-8") as f:
         json.dump({"format": "night-ledger", "nights": old}, f)
@@ -687,6 +737,24 @@ def test_failed_run_leaves_ledger_untouched():
     proc2 = _run(data2, out2, ledger_path=unwritable)
     assert proc2.returncode == 2, "账本写不进去时应退出 2，实际 %r" % (proc2.returncode,)
     assert not os.path.exists(out2), "账本写不进去时不该产出报告"
+
+
+def test_night_offsets_recovered_from_record():
+    """题面原文：「每夜的零点偏移由每夜自己的观测估出来」。
+
+    出厂曲线每夜都带一个 ±20 mmag 量级的零点偏移：报出来的夜数与独立复算一致、
+    按夜号升序，每夜偏移与独立复算相差不超过 2 mmag（只给一天的曲线拉不出偏移）。
+    """
+    data = make_curve(seed=1901)
+    exp = expect(data)
+    report, ctx = run_case(data)
+    assert isinstance(report, dict), "没产出报告：stderr=%r" % (ctx["proc"].stderr or "")
+    rows = _report_nights(report)
+    got = [int(r["night"]) for r in rows]
+    assert got == exp["nights"], "夜号与独立复算不一致：%r 对 %r" % (got, exp["nights"])
+    wrong = [r["night"] for r in rows
+             if abs(float(r["offset_mmag"]) - exp["offsets"][int(r["night"])]) > 2.0]
+    assert not wrong, "这些夜的零点偏移对不上：%r" % (wrong,)
 
 
 def test_zero_sigma_clip_rejected():
