@@ -635,3 +635,37 @@ def test_failed_run_leaves_cache_untouched():
     proc2 = _run(data2, out2, cache_path=unwritable)
     assert proc2.returncode == 2, "缓存写不进去时应退出 2，实际 %r" % proc2.returncode
     assert not os.path.exists(out2), "缓存写不进去时不该产出报告"
+
+
+def test_zero_sigma_clip_rejected():
+    """题面原文：「fit.sigma_clip 要是正数」。
+
+    把剔点阈值设成 0（边界值）：必须退出码 2 且不产出结论。
+    """
+    data = make_curve(seed=921, n_spikes=0)
+    data["fit"]["sigma_clip"] = 0
+    tmp = tempfile.mkdtemp(prefix="lc-bound-")
+    dpath = os.path.join(tmp, "lcurve.json")
+    opath = os.path.join(tmp, "report.json")
+    with open(dpath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    proc = _run(dpath, opath)
+    assert proc.returncode == 2, "剔点阈值为 0 时退出码应为 2，实际 %r" % proc.returncode
+    assert not os.path.exists(opath), "剔点阈值为 0 时不该产出结论"
+
+def test_zero_f_min_rejected():
+    """题面原文：「f_min 与 f_max 不满足 0 < f_min < f_max」属非法记录。
+
+    把 f_min 设成 0（正好卡在下界）：必须退出码 2 且不产出结论。
+    """
+    data = make_curve(seed=931, n_spikes=0)
+    data["fit"]["f_min"] = 0.0
+    tmp = tempfile.mkdtemp(prefix="lc-fmin-")
+    dpath = os.path.join(tmp, "lcurve.json")
+    opath = os.path.join(tmp, "report.json")
+    with open(dpath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    proc = _run(dpath, opath)
+    assert proc.returncode == 2, "f_min 为 0 时退出码应为 2，实际 %r" % proc.returncode
+    assert not os.path.exists(opath), "f_min 为 0 时不该产出结论"
+
