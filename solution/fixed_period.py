@@ -62,11 +62,11 @@ def load_data(path):
             _fail("fit.%s 要是有限数值" % name)
     f_min = float(f_min)
     f_max = float(f_max)
-    if f_min <= 0 or f_max <= f_min:
+    if not (f_min > 0 and f_max > f_min):
         _fail("fit 要满足 0 < f_min < f_max")
     if not isinstance(n_harm, int) or isinstance(n_harm, bool) or n_harm < 1:
         _fail("fit.n_harmonics 要是不小于 1 的整数")
-    if not isinstance(clip, (int, float)) or isinstance(clip, bool) or float(clip) <= 0:
+    if not isinstance(clip, (int, float)) or isinstance(clip, bool) or not (float(clip) > 0):
         _fail("fit.sigma_clip 要是正数")
     if not isinstance(max_iter, int) or isinstance(max_iter, bool) or max_iter < 0:
         _fail("fit.max_clip_iter 要是不小于 0 的整数")
