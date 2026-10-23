@@ -186,27 +186,64 @@ def expect(data):
     return {"period": period, "epoch": (period * phi / TWO_PI) % period,
             "amplitude": math.hypot(coef[1], coef[2]), "chi2": chi2,
             "reduced": chi2 / dof, "n_used": len(keep), "dof": dof,
-            "coef": coef, "f": f_best,
+            "coef": coef, "f": f_best, "keep": keep,
             "sigma_period": period * period * sigma_f,
             "next_period": next_period}
 
 
+def _median(values):
+    ordered = sorted(values)
+    n = len(ordered)
+    if not n:
+        return 0.0
+    if n % 2:
+        return ordered[n // 2]
+    return 0.5 * (ordered[n // 2 - 1] + ordered[n // 2])
+
+
+def expect_ledger(data, exp):
+    """按独立复算的最优频率与保留点集，逐夜算点数 / 保留点数 / 标准化残差绝对值中位数。"""
+    n_harm = int(data["fit"]["n_harmonics"])
+    per = {}
+    for s in data["samples"]:
+        night = int(math.floor(float(s["t"])))
+        per.setdefault(night, {"points": 0, "resid": []})
+        per[night]["points"] += 1
+    for t, y, sig in exp["keep"]:
+        night = int(math.floor(t))
+        row = _row(t, exp["f"], n_harm)
+        model = sum(c * r for c, r in zip(exp["coef"], row))
+        per[night]["resid"].append(abs((y - model) / sig))
+    out = {}
+    for night, slot in per.items():
+        out[night] = {"points": slot["points"], "kept": len(slot["resid"]),
+                      "resid_median_sigma": _median(slot["resid"])}
+    return out
+
+
+def _shift(data, offset):
+    out = json.loads(json.dumps(data))
+    for s in out["samples"]:
+        s["t"] = round(float(s["t"]) + offset, 5)
+    return out
+
+
 # ---------------------------------------------------------------- 驱动被测程序
-def _run(path, out_path, cache_path=None, timeout=240):
+def _run(path, out_path, ledger_path=None, timeout=240):
     cmd = [sys.executable, ENTRY, "--data", path, "--out", out_path]
-    if cache_path is not None:
-        cmd += ["--cache", cache_path]
+    if ledger_path is not None:
+        cmd += ["--ledger", ledger_path]
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout)
 
 
-def run_case(data, cache_path=None):
+def run_case(data, ledger_path=None):
     tmp = tempfile.mkdtemp(prefix="lc-case-")
     dpath = os.path.join(tmp, "lcurve.json")
     opath = os.path.join(tmp, "report.json")
     with open(dpath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    proc = _run(dpath, opath, cache_path)
+    proc = _run(dpath, opath, ledger_path)
     report = None
     if os.path.exists(opath):
         try:
@@ -235,7 +272,7 @@ def _num(report, key):
 
 # ---------------------------------------------------------------- 测试
 def test_period_matches_independent_search():
-    """题面原文：「步长 df = 1/(4·观测跨度)……取加权残差平方和最小的频率」。
+    """题面原文：「（跨度是最早与最晚观测点之差）」。
 
     出厂曲线（周期 1.8539 天）：报告周期与独立复算相差不超过 0.3%，
     且与真值 1.8539 天相差不超过 1%。
@@ -253,7 +290,7 @@ def test_period_matches_independent_search():
 
 
 def test_half_period_harmonic_rejected():
-    """题面原文：「模型是常数项加前 n_harmonics 阶谐波」，脉冲形状不对称时不能按一半周期报。
+    """题面原文：「模型是常数项加前」，脉冲形状不对称时不能按一半周期报。
 
     报告周期必须落在真周期附近，不能落到一半周期或倍周期上；谐波阶数不够时残差平方和会
     明显偏大，所以 chi2 也要与独立复算相差不超过 10%。
@@ -275,7 +312,7 @@ def test_half_period_harmonic_rejected():
 
 
 def test_epoch_and_amplitude_match():
-    """题面原文：「epoch_days 落在 [0, P)」「amplitude_mmag = sqrt(a1² + b1²)」。
+    """题面原文：「报告给出基波的极大时刻与半振幅」。
 
     极大时刻与独立复算相差不超过 3%（按周期折算），半振幅相差不超过 6%。
     """
@@ -295,7 +332,7 @@ def test_epoch_and_amplitude_match():
 
 
 def test_outliers_clipped_before_fit():
-    """题面原文：「绝对值超过 sigma_clip 的整点剔除，然后重拟合」」。
+    """题面原文：「在最优频率上剔离群点」。
 
     曲线里有 9 个宇宙线尖峰：n_used 必须比 n_total 少掉这些点（独立复算差一个点以内），
     且 chi2 落回噪声量级（reduced_chi2 不超过 1.6）。
@@ -315,7 +352,7 @@ def test_outliers_clipped_before_fit():
 
 
 def test_second_star_other_period():
-    """题面原文：「复检会喂别的星的曲线，周期、脉冲形状、观测跨度、噪声水平与离群点都不同」。
+    """题面原文：「复检会换星、周期、脉冲形状、观测跨度、噪声水平与离群点」。
 
     换一颗周期 0.6213 天、两阶谐波、更短跨度、更小噪声的星，周期与独立复算相差不超过 0.3%。
     """
@@ -333,7 +370,7 @@ def test_second_star_other_period():
 
 
 def test_long_period_near_low_frequency_edge():
-    """题面原文：「从 f_min 起逐步加大，扫到 f_max 为止」——长周期星的频率贴着下边界。
+    """题面原文：「逐步加大，扫到」——长周期星的频率贴着下边界。
 
     周期 48 天（频率 0.0208，只比 f_min=0.02 高半个粗步长）：频率搜索不能跳过边界点，
     周期要落在独立复算 0.5% 以内。
@@ -370,7 +407,7 @@ def test_chi2_and_dof_contract():
 
 
 def test_period_uncertainty_from_curvature():
-    """题面原文：「sigma_f = sqrt(2/c)、sigma_P = P²·sigma_f」。
+    """题面原文：「sigma_f = sqrt(2/c)」。
 
     曲率法给出的周期不确定度必须为正、与独立复算相差不超过 15%，且比周期小三四个量级。
     """
@@ -386,7 +423,7 @@ def test_period_uncertainty_from_curvature():
 
 
 def test_next_candidate_is_reported():
-    """题面原文：「取剩下的点里残差平方和最小的那个频率……用来判断这次定出的周期有没有被谐波或日周期缺测的假峰抢走」。
+    """题面原文：「在粗扫网格上排除最优频率 ±5% 的邻域」。
 
     次优候选不能就是最优周期本身，而且要落在最优周期的整数倍或整数分之一上（谐波族），
     说明程序确实在粗扫网格上找到了那条与主峰竞争的假峰。
@@ -404,7 +441,7 @@ def test_next_candidate_is_reported():
 
 
 def test_invalid_data_rejected_without_output():
-    """题面原文：「记录不合法时以退出码 2 结束、往 stderr 写原因、不产出报告」。
+    """题面原文：「返回 2 且不写结论」。
 
     五种坏记录：观测点不足 100、时间不单调、sigma 非正、f_min 不小于 f_max、有效点不足。
     每种都要退出码 2、stderr 有原因、目录里不留报告也不留临时文件。
@@ -441,7 +478,7 @@ def test_invalid_data_rejected_without_output():
 
 
 def test_report_schema_and_rounding():
-    """题面原文：「period_days 保留五位小数；epoch_days 保留四位；amplitude_mmag、chi2 保留两位；reduced_chi2 保留四位」。
+    """题面原文：「保留五位小数；」。
 
     校验顶层字段、位数与有限性，meta.model 写成 harmonics-<H>，文件里不出现 NaN 或 Infinity。
     """
@@ -463,7 +500,7 @@ def test_report_schema_and_rounding():
 
 
 def test_rerun_produces_identical_bytes():
-    """题面原文：「同一份记录重复运行，报告逐字节一致（不要写时间戳之类的运行期信息）」。
+    """题面原文：「对同一份时序重复出结论，字节级一致」。
 
     连跑两次，两个报告文件字节完全相同。
     """
@@ -479,7 +516,7 @@ def test_rerun_produces_identical_bytes():
 
 
 def test_failed_run_keeps_previous_report():
-    """题面原文：「运行失败时不能覆盖上一次已经写好的报告」。
+    """题面原文：「这次失败就不要动上一次的结论文件」。
 
     先跑一次合格记录留下报告，再用时间不单调的坏记录跑：退出码 2，旧报告字节不变。
     """
@@ -502,143 +539,158 @@ def test_failed_run_keeps_previous_report():
     assert open(opath, "rb").read() == before, "运行失败把上一次的报告覆盖了"
 
 
-def test_cache_reuse_and_append():
-    """题面原文：「这个 key 已在缓存里就原地替换该条目的 report；不在就追加到末尾」。
+def test_ledger_records_every_night_sorted():
+    """题面原文：「每一夜都要在账本里有一行」。
 
-    连跑三次：同一份记录跑两次（中间把缓存里那条报告的 period_days 改成哨兵值 99.0），
-    第二次必须直接复用缓存、报出哨兵值；换一份记录再跑，缓存变成两条、顺序不变。
+    出厂曲线覆盖若干观测夜：账本行数与独立分组一致、按夜号升序、各夜点数之和等于观测点总数、
+    保留点数之和等于 n_used，标准化残差中位数与独立复算相差不超过 0.25。
     """
-    import hashlib
-    cache = os.path.join(tempfile.mkdtemp(prefix="lc-cache-"), "cache.json")
-    data_a = make_curve(seed=1301)
-    report_a, ctx_a = run_case(data_a, cache_path=cache)
-    for key in NEED:
-        assert key in report_a, "第一次运行就缺字段 %s" % key
-    assert os.path.exists(cache), "运行结束没有写缓存文件"
-    with open(cache, encoding="utf-8") as f:
+    data = make_curve(seed=1201)
+    ledger = os.path.join(tempfile.mkdtemp(prefix="lc-ledger-"), "ledger.json")
+    report, ctx = run_case(data, ledger_path=ledger)
+    assert isinstance(report, dict), "没产出报告：stderr=%r" % (ctx["proc"].stderr or "")
+    assert os.path.exists(ledger), "运行结束没有写账本文件"
+    with open(ledger, encoding="utf-8") as f:
         body = json.load(f)
-    assert isinstance(body, dict) and body.get("version") == 1, "缓存结构不对：%r" % (list(body)[:4],)
-    entries = body.get("entries")
-    assert isinstance(entries, list) and len(entries) == 1, "缓存条目数应为 1，实际 %r" % (entries,)
-    key_a = hashlib.sha256(open(ctx_a["data"], "rb").read()).hexdigest()
-    assert entries[0].get("key") == key_a, "缓存 key 不是记录字节的 sha256：%r" % (entries[0].get("key"),)
-    assert isinstance(entries[0].get("report"), dict), "缓存条目里的 report 不是对象"
-
-    entries[0]["report"]["period_days"] = 99.0
-    with open(cache, "w", encoding="utf-8") as f:
-        json.dump(body, f, ensure_ascii=False)
-    report_again, _ = run_case(data_a, cache_path=cache)
-    assert float(report_again.get("period_days", 0.0)) == 99.0, \
-        "第二次跑同一份记录没有复用缓存：period_days=%r" % (report_again.get("period_days"),)
-
-    data_b = make_curve(period=0.6213, span_days=60.0, n_nights=30, per_night=12,
-                        sigma=12.0, harmonics=((1, 30.0, -18.0), (2, 9.0, 4.0)),
-                        n_spikes=6, n_harm=2, seed=1409)
-    report_b, ctx_b = run_case(data_b, cache_path=cache)
-    exp_b = expect(data_b)
-    assert abs(float(report_b["period_days"]) - exp_b["period"]) <= 0.01 * exp_b["period"], \
-        "换记录后没有重新搜索：period_days=%r，独立复算 %r" % (report_b.get("period_days"), exp_b["period"])
-    with open(cache, encoding="utf-8") as f:
-        body2 = json.load(f)
-    keys = [e.get("key") for e in body2.get("entries", [])]
-    assert len(keys) == 2, "缓存条目数应为 2，实际 %r" % (keys,)
-    assert keys[0] == key_a, "原有条目被挪动或覆盖了：%r" % (keys,)
-    key_b = hashlib.sha256(open(ctx_b["data"], "rb").read()).hexdigest()
-    assert keys[1] == key_b, "新条目没有追加到末尾：%r" % (keys,)
-
-
-def test_corrupt_cache_recovered():
-    """题面原文：「缓存文件读不出来、不是合法 JSON 或结构不对：当作空缓存」。
-
-    先塞一段乱码当缓存，再跑一份合格记录：退出码 0、报告正确、缓存被重写成合法结构。
-    """
-    cache = os.path.join(tempfile.mkdtemp(prefix="lc-cache-bad-"), "cache.json")
-    with open(cache, "w", encoding="utf-8") as f:
-        f.write("{ this is not json ][")
-    data = make_curve(seed=1511)
-    report, _ = run_case(data, cache_path=cache)
+    assert body.get("format") == "night-ledger", "账本的格式标签不对：%r" % (body.get("format"),)
+    rows = body.get("nights")
+    assert isinstance(rows, list), "账本的 nights 不是列表：%r" % (body,)
     exp = expect(data)
-    assert isinstance(report, dict), "坏缓存把整次运行拖挂了（没有报告）"
+    want = expect_ledger(data, exp)
+    got = [r["night"] for r in rows]
+    assert got == sorted(want), "夜号与独立分组不一致或没按升序：%r" % (got,)
+    assert sum(r["points"] for r in rows) == len(data["samples"]), \
+        "各夜点数之和应为观测点总数 %d，实际 %r" % (len(data["samples"]), sum(r["points"] for r in rows))
+    assert sum(r["kept"] for r in rows) == int(report["n_used"]), \
+        "各夜保留点数之和应为 n_used=%r，实际 %r" % (report["n_used"], sum(r["kept"] for r in rows))
+    wrong_points = [r["night"] for r in rows if r["points"] != want[r["night"]]["points"]]
+    assert not wrong_points, "这些夜的点数不对：%r" % (wrong_points,)
+    bad_median = [r["night"] for r in rows
+                  if abs(float(r["resid_median_sigma"]) - want[r["night"]]["resid_median_sigma"]) > 0.25]
+    assert not bad_median, "这些夜的标准化残差中位数对不上：%r" % (bad_median,)
+
+
+def test_ledger_replaces_matching_night_in_place():
+    """题面原文：「同一夜号整条替换，别的夜原样留着」。
+
+    账本里先放一条更早的夜（哨兵数值）与一条本次会命中的夜（数值是错的），跑完以后：
+    哨兵那行一个字段都没动、命中的那行被本次统计覆盖且位置不变，新夜按升序补进来。
+    """
+    data = make_curve(seed=1213)
+    exp = expect(data)
+    want = expect_ledger(data, exp)
+    nights = sorted(want)
+    hit = nights[len(nights) // 2]
+    foreign = min(nights) - 7
+    seeded = [
+        {"night": foreign, "points": 11, "kept": 9, "resid_median_sigma": 0.5},
+        {"night": hit, "points": 1, "kept": 0, "resid_median_sigma": 9.999},
+    ]
+    ledger = os.path.join(tempfile.mkdtemp(prefix="lc-ledger-merge-"), "ledger.json")
+    with open(ledger, "w", encoding="utf-8") as f:
+        json.dump({"format": "night-ledger", "nights": seeded}, f)
+    report, ctx = run_case(data, ledger_path=ledger)
+    assert isinstance(report, dict), "没产出报告：stderr=%r" % (ctx["proc"].stderr or "")
+    with open(ledger, encoding="utf-8") as f:
+        body = json.load(f)
+    rows = body["nights"]
+    got = [r["night"] for r in rows]
+    assert got == sorted(set(list(want) + [foreign])), "夜号集合或顺序不对：%r" % (got,)
+    assert rows[0] == seeded[0], "别的夜那行被动过了：%r" % (rows[0],)
+    hit_row = [r for r in rows if r["night"] == hit][0]
+    assert hit_row["points"] == want[hit]["points"], "命中的夜没被本次统计替换：%r" % (hit_row,)
+    assert hit_row["kept"] == want[hit]["kept"], "命中那行的保留点数不对：%r" % (hit_row,)
+    assert abs(float(hit_row["resid_median_sigma"]) - want[hit]["resid_median_sigma"]) <= 0.25, \
+        "命中那行的标准化残差中位数不对：%r" % (hit_row,)
+
+
+def test_ledger_capped_at_64_nights():
+    """题面原文：「账本最多留 64 夜，超出先丢夜号最小的」。
+
+    先塞 64 条旧夜（夜号 1..64），再跑一份夜号远在后面的曲线：账本仍是 64 行，
+    丢掉的是夜号最小的那几条，本次的夜按升序排在末尾。
+    """
+    data = _shift(make_curve(seed=1307, n_nights=10, per_night=12, span_days=30.0), 70000.0)
+    exp = expect(data)
+    want = expect_ledger(data, exp)
+    new_nights = sorted(want)
+    old = [{"night": i + 1, "points": 5, "kept": 5, "resid_median_sigma": 1.0} for i in range(64)]
+    ledger = os.path.join(tempfile.mkdtemp(prefix="lc-ledger-cap-"), "ledger.json")
+    with open(ledger, "w", encoding="utf-8") as f:
+        json.dump({"format": "night-ledger", "nights": old}, f)
+    report, ctx = run_case(data, ledger_path=ledger)
+    assert isinstance(report, dict), "没产出报告：stderr=%r" % (ctx["proc"].stderr or "")
+    with open(ledger, encoding="utf-8") as f:
+        body = json.load(f)
+    rows = body["nights"]
+    got = [r["night"] for r in rows]
+    assert len(rows) == 64, "账本应只留 64 夜，实际 %d 行" % len(rows)
+    keep_from = len(new_nights) + 1
+    assert got == sorted(list(range(keep_from, 65)) + new_nights), \
+        "留下的不是最新的 64 夜：%r" % (got,)
+
+
+def test_corrupt_ledger_rebuilt():
+    """题面原文：「账本读不出来或结构不合约定，就当空账本重写」。
+
+    先塞一段乱码当账本，再跑一份合格记录：退出码 0、报告正确、账本被重写成只有本次的夜。
+    """
+    ledger = os.path.join(tempfile.mkdtemp(prefix="lc-ledger-bad-"), "ledger.json")
+    with open(ledger, "w", encoding="utf-8") as f:
+        f.write("{ not json ][")
+    data = make_curve(seed=1411)
+    report, ctx = run_case(data, ledger_path=ledger)
+    assert isinstance(report, dict), "坏账本把整次运行拖挂了：stderr=%r" % (ctx["proc"].stderr or "")
+    exp = expect(data)
+    want = expect_ledger(data, exp)
     assert abs(float(report["period_days"]) - exp["period"]) <= 0.01 * exp["period"], \
-        "坏缓存下报告不对：period_days=%r，独立复算 %r" % (report.get("period_days"), exp["period"])
-    with open(cache, encoding="utf-8") as f:
+        "坏账本下报告不对：period_days=%r，独立复算 %r" % (report.get("period_days"), exp["period"])
+    with open(ledger, encoding="utf-8") as f:
         body = json.load(f)
-    assert body.get("version") == 1, "坏缓存没有被重写成合法结构：%r" % (body,)
-    assert len(body.get("entries", [])) == 1, "重写后的缓存应只有一条，实际 %r" % (body.get("entries"),)
+    assert body.get("format") == "night-ledger", "坏账本没有被重写成合法结构：%r" % (body.get("format"),)
+    got = [r["night"] for r in body.get("nights", [])]
+    assert got == sorted(want), "重写后的账本夜号不对：%r" % (got,)
 
 
-def test_cache_capped_at_32_entries():
-    """题面原文：「缓存最多留 32 条：追加新条目时如果会超过 32 条，从最早的那头丢掉」。
+def test_failed_run_leaves_ledger_untouched():
+    """题面原文：「判定为非法记录时账本一个字节都不动」。
 
-    先往缓存里塞满 32 条旧条目，再跑一份新记录：缓存仍是 32 条 —— 最早那条被丢掉、
-    新的一条在末尾、原来第 2 到第 32 条顺序不变。
+    先跑合格记录把账本建起来，再用时间不递增的坏记录跑：退出码 2，账本与旧报告的字节都不变；
+    再把账本路径指成一个目录（写不进去），也要按非法记录退出 2、不产出报告。
     """
-    import hashlib
-    cache = os.path.join(tempfile.mkdtemp(prefix="lc-cache-cap-"), "cache.json")
-    stub = {"n_total": 400, "n_used": 391, "dof": 384, "period_days": 1.85315,
-            "epoch_days": 0.0832, "amplitude_mmag": 42.01,
-            "period_uncertainty_days": 0.00044, "next_candidate_period_days": 3.70258,
-            "chi2": 411.8, "reduced_chi2": 1.0724,
-            "meta": {"model": "harmonics-3", "unit": "HJD"}}
-    old_keys = ["%064x" % (i + 1) for i in range(32)]
-    with open(cache, "w", encoding="utf-8") as f:
-        json.dump({"version": 1,
-                   "entries": [{"key": k, "report": stub} for k in old_keys]}, f)
-
-    data = make_curve(seed=3000, n_spikes=0)
-    report, ctx = run_case(data, cache_path=cache)
-    assert isinstance(report, dict), "新记录没有产出报告"
-    with open(cache, encoding="utf-8") as f:
-        body = json.load(f)
-    entries = body.get("entries")
-    assert isinstance(entries, list), "缓存结构不对：%r" % (body,)
-    assert len(entries) == 32, "缓存应只留 32 条，实际 %d 条" % len(entries)
-    got = [e.get("key") for e in entries]
-    new_key = hashlib.sha256(open(ctx["data"], "rb").read()).hexdigest()
-    assert got[-1] == new_key, "新条目没有追加到末尾：%r" % (got[-1],)
-    assert old_keys[0] not in got, "最早的一条没有被丢掉"
-    assert got[:-1] == old_keys[1:], "留下的不是原来第 2 到第 32 条（顺序也不对）"
-
-
-def test_failed_run_leaves_cache_untouched():
-    """题面原文：「记录不合法（退出码 2）时缓存文件一个字节都不许动」。
-
-    先跑一份合格记录把缓存建起来，再用坏记录跑：退出码 2，缓存字节与旧报告都不变；
-    再把缓存路径指成一个目录（写不进去），也要按非法记录退出 2、不产出报告。
-    """
-    cache = os.path.join(tempfile.mkdtemp(prefix="lc-cache-keep-"), "cache.json")
+    ledger = os.path.join(tempfile.mkdtemp(prefix="lc-ledger-keep-"), "ledger.json")
     good = make_curve(seed=1601, n_spikes=0)
-    report, ctx = run_case(good, cache_path=cache)
-    assert isinstance(report, dict), "合格记录没有产出报告"
-    before_cache = open(cache, "rb").read()
+    report, ctx = run_case(good, ledger_path=ledger)
+    assert isinstance(report, dict), "合格记录没有产出报告：stderr=%r" % (ctx["proc"].stderr or "")
+    before_ledger = open(ledger, "rb").read()
     before_report = open(ctx["out"], "rb").read()
 
     broken = json.loads(json.dumps(good))
     broken["samples"][7]["t"] = broken["samples"][6]["t"]
-    bad_dir = tempfile.mkdtemp(prefix="lc-cache-broken-")
+    bad_dir = tempfile.mkdtemp(prefix="lc-ledger-broken-")
     bad_data = os.path.join(bad_dir, "lcurve.json")
     bad_out = os.path.join(bad_dir, "report.json")
     with open(bad_data, "w", encoding="utf-8") as f:
         json.dump(broken, f, ensure_ascii=False)
-    proc = _run(bad_data, bad_out, cache_path=cache)
-    assert proc.returncode == 2, "坏记录应退出 2，实际 %r" % proc.returncode
-    assert open(cache, "rb").read() == before_cache, "非法记录把缓存改动了"
+    proc = _run(bad_data, bad_out, ledger_path=ledger)
+    assert proc.returncode == 2, "坏记录应退出 2，实际 %r" % (proc.returncode,)
+    assert (proc.stderr or "").strip(), "坏记录没在 stderr 说清缘由"
+    assert open(ledger, "rb").read() == before_ledger, "非法记录把账本改动了"
     assert open(ctx["out"], "rb").read() == before_report, "非法记录把旧报告改动了"
     assert not os.path.exists(bad_out), "非法记录不该产出报告"
 
-    unwritable = tempfile.mkdtemp(prefix="lc-cache-dir-")
-    good2 = make_curve(seed=1709, n_spikes=0)
+    unwritable = tempfile.mkdtemp(prefix="lc-ledger-dir-")
     data2 = os.path.join(unwritable, "lcurve.json")
     out2 = os.path.join(unwritable, "report.json")
     with open(data2, "w", encoding="utf-8") as f:
-        json.dump(good2, f, ensure_ascii=False)
-    proc2 = _run(data2, out2, cache_path=unwritable)
-    assert proc2.returncode == 2, "缓存写不进去时应退出 2，实际 %r" % proc2.returncode
-    assert not os.path.exists(out2), "缓存写不进去时不该产出报告"
+        json.dump(make_curve(seed=1709, n_spikes=0), f, ensure_ascii=False)
+    proc2 = _run(data2, out2, ledger_path=unwritable)
+    assert proc2.returncode == 2, "账本写不进去时应退出 2，实际 %r" % (proc2.returncode,)
+    assert not os.path.exists(out2), "账本写不进去时不该产出报告"
 
 
 def test_zero_sigma_clip_rejected():
-    """题面原文：「fit.sigma_clip 要是正数」。
+    """题面原文：「取 0 或负数一律当非法记录」。
 
     把剔点阈值设成 0（边界值）：必须退出码 2 且不产出结论。
     """
@@ -654,7 +706,7 @@ def test_zero_sigma_clip_rejected():
     assert not os.path.exists(opath), "剔点阈值为 0 时不该产出结论"
 
 def test_zero_f_min_rejected():
-    """题面原文：「f_min 与 f_max 不满足 0 < f_min < f_max」属非法记录。
+    """题面原文：「频率范围不满足」属非法记录。
 
     把 f_min 设成 0（正好卡在下界）：必须退出码 2 且不产出结论。
     """

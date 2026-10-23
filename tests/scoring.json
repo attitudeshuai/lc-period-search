@@ -5,76 +5,80 @@
   ],
   "tests": {
     "test_outputs.py::test_period_matches_independent_search": {
-      "weight": 0.10117204301075268,
-      "rationale": "周期搜索、谐波拟合与剔点（period matches independent search）"
+      "weight": 0.115,
+      "rationale": "核心：频率网格步长与加权残差平方和最小的口径，周期必须落在独立复算与真值附近"
     },
     "test_outputs.py::test_half_period_harmonic_rejected": {
-      "weight": 0.08093763440860215,
-      "rationale": "test_half_period_harmonic_rejected"
+      "weight": 0.09,
+      "rationale": "谐波阶数不够时周期会掉到半周期或倍周期上，同时 chi2 偏大"
     },
     "test_outputs.py::test_epoch_and_amplitude_match": {
-      "weight": 0.07082043010752688,
-      "rationale": "周期搜索、谐波拟合与剔点（epoch and amplitude match）"
+      "weight": 0.065,
+      "rationale": "极大时刻折算与基波半振幅，检验系数解出来之后的后处理"
     },
     "test_outputs.py::test_outliers_clipped_before_fit": {
-      "weight": 0.07082043010752688,
-      "rationale": "周期搜索、谐波拟合与剔点（outliers clipped before fit）"
+      "weight": 0.075,
+      "rationale": "宇宙线尖峰必须按 sigma_clip 剔掉，n_used 与 reduced_chi2 一起收敛"
     },
     "test_outputs.py::test_second_star_other_period": {
-      "weight": 0.060703225806451606,
-      "rationale": "周期搜索、谐波拟合与剔点（second star other period）"
+      "weight": 0.065,
+      "rationale": "换一颗周期与噪声都不同的星仍要吻合，挡写死样例值的做法"
     },
     "test_outputs.py::test_long_period_near_low_frequency_edge": {
-      "weight": 0.07082043010752688,
-      "rationale": "周期搜索、谐波拟合与剔点（long period near low frequency edge）"
+      "weight": 0.065,
+      "rationale": "长周期星的频率贴着 f_min 下界，检验搜索区间端点是否取到"
     },
     "test_outputs.py::test_chi2_and_dof_contract": {
-      "weight": 0.05058602150537634,
-      "rationale": "周期搜索、谐波拟合与剔点（chi2 and dof contract）"
+      "weight": 0.045,
+      "rationale": "dof = n_used - (2H+1) 与 reduced_chi2 = chi2 / dof 的口径"
     },
     "test_outputs.py::test_period_uncertainty_from_curvature": {
-      "weight": 0.05058602150537634,
-      "rationale": "周期搜索、谐波拟合与剔点（period uncertainty from curvature）"
+      "weight": 0.05,
+      "rationale": "周期不确定度按残差平方和在最优频率附近的曲率估"
     },
     "test_outputs.py::test_next_candidate_is_reported": {
-      "weight": 0.05058602150537634,
-      "rationale": "周期搜索、谐波拟合与剔点（next candidate is reported）"
+      "weight": 0.05,
+      "rationale": "次优候选周期用来挡谐波与日周期缺测造成的假峰"
     },
     "test_outputs.py::test_report_schema_and_rounding": {
-      "weight": 0.05058602150537634,
-      "rationale": "周期搜索、谐波拟合与剔点（report schema and rounding）"
+      "weight": 0.025,
+      "rationale": "结论字段、位数与有限性，属输出契约的机械校验"
     },
     "test_outputs.py::test_rerun_produces_identical_bytes": {
-      "weight": 0.05058602150537634,
-      "rationale": "周期搜索、谐波拟合与剔点（rerun produces identical bytes）"
+      "weight": 0.025,
+      "rationale": "同一份时序重复出结论要逐字节一致，不许带运行时刻"
     },
     "test_outputs.py::test_failed_run_keeps_previous_report": {
-      "weight": 0.04046881720430107,
-      "rationale": "周期搜索、谐波拟合与剔点（failed run keeps previous report）"
+      "weight": 0.02,
+      "rationale": "失败运行不得改动上一次的结论文件"
     },
-    "test_outputs.py::test_cache_reuse_and_append": {
-      "weight": 0.07082043010752688,
-      "rationale": "周期搜索、谐波拟合与剔点（cache reuse and append）"
+    "test_outputs.py::test_ledger_records_every_night_sorted": {
+      "weight": 0.07,
+      "rationale": "夜账本主体：逐夜点数、保留点数与标准化残差中位数，按夜号升序"
     },
-    "test_outputs.py::test_cache_capped_at_32_entries": {
-      "weight": 0.07082043010752688,
-      "rationale": "周期搜索、谐波拟合与剔点（cache capped at 32 entries）"
+    "test_outputs.py::test_ledger_replaces_matching_night_in_place": {
+      "weight": 0.06,
+      "rationale": "跨运行状态：同夜号整条替换且位置不变，别的夜一个字段都不许动"
     },
-    "test_outputs.py::test_corrupt_cache_recovered": {
-      "weight": 0.030351612903225803,
-      "rationale": "周期搜索、谐波拟合与剔点（corrupt cache recovered）"
+    "test_outputs.py::test_ledger_capped_at_64_nights": {
+      "weight": 0.045,
+      "rationale": "账本容量 64 夜，超出从夜号最小的那头丢，末尾始终是最大的"
     },
-    "test_outputs.py::test_failed_run_leaves_cache_untouched": {
-      "weight": 0.020234408602150537,
-      "rationale": "周期搜索、谐波拟合与剔点（failed run leaves cache untouched）"
+    "test_outputs.py::test_corrupt_ledger_rebuilt": {
+      "weight": 0.035,
+      "rationale": "坏账本按空账本处理并重写，不能把整次复核拖挂"
+    },
+    "test_outputs.py::test_failed_run_leaves_ledger_untouched": {
+      "weight": 0.04,
+      "rationale": "非法记录与账本不可写两种情况下账本都要保持原样，且不产出结论"
     },
     "test_outputs.py::test_zero_sigma_clip_rejected": {
-      "weight": 0.029099999999999997,
-      "rationale": "边界值拒收：正好落在「必须为正」的边界上"
+      "weight": 0.035,
+      "rationale": "边界值拒收：sigma_clip 正好为 0"
     },
     "test_outputs.py::test_zero_f_min_rejected": {
-      "weight": 0.03,
-      "rationale": "边界值拒收：f_min 正好等于下界"
+      "weight": 0.025,
+      "rationale": "边界值拒收：f_min 正好等于下界 0"
     }
   }
 }

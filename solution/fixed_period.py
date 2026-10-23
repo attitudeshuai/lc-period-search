@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""变星光变曲线周期复核：三阶谐波加权拟合 + 周期搜索。
+"""变星光变曲线周期复核：三阶谐波加权拟合 + 周期搜索 + 夜间账本。
 
 命令行：
-    python3 src/period.py --data data/lcurve.json --out out/report.json
+    python3 src/period.py --data data/lcurve.json --out out/report.json --ledger out/ledger.json
 
 口径：
   · 相位 th = 2π·(t mod P)/P，模型 m(t) = c0 + Σ_{k=1..H} [a_k·cos(k·th) + b_k·sin(k·th)]，
@@ -14,7 +14,8 @@
     （最多 max_clip_iter 轮）；最后在最优频率 ±df 内用黄金分割细化；
   · epoch_days 是基波极大时刻（落在 [0, P)），amplitude_mmag 是基波半振幅；
   · dof = n_used - 7，reduced_chi2 = chi2 / dof；
-  · 复核缓存按记录字节的 sha256 命中复用，未命中追加；缓存最多 32 条，超出先丢最早的；
+  · 夜间账本按夜号（floor(t)）汇总本次记录：点数、保留点数、保留点标准化残差绝对值中位数，
+    与旧账本按夜号合并（同夜号整条替换、按夜号升序、最多留 64 夜）；
   · 输出先写临时文件再原子替换；非法输入以退出码 2 结束且不落文件。
 """
 from __future__ import annotations
@@ -27,7 +28,8 @@ import sys
 import tempfile
 
 EXIT_INVALID = 2
-CACHE_LIMIT = 32
+LEDGER_LIMIT = 64
+LEDGER_FORMAT = "night-ledger"
 TWO_PI = 2.0 * math.pi
 
 
@@ -247,7 +249,7 @@ def search_period(scan):
     others = [(c, f) for c, f in grid if abs(f - f_best) > 0.05 * f_best]
     next_period = 1.0 / min(others)[1] if others else period
     return {"f": f_best, "period": period, "coef": coef, "chi2": chi2,
-            "n_used": len(keep), "n_total": len(ts), "n_harm": n_harm,
+            "n_used": len(keep), "n_total": len(ts), "n_harm": n_harm, "keep": keep,
             "sigma_period": period * period * sigma_f, "next_period": next_period}
 
 
@@ -277,33 +279,87 @@ def build_report(scan, res):
     }
 
 
-def load_cache(path):
-    """读复核缓存；读不出来或结构不对就当空缓存。"""
+def _median(values):
+    """中位数：奇数个取中间那一个，偶数个取中间两个的平均。"""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    if n % 2:
+        return ordered[n // 2]
+    return 0.5 * (ordered[n // 2 - 1] + ordered[n // 2])
+
+
+def night_stats(scan, res):
+    """按夜号汇总本次记录：点数、保留点数、保留点标准化残差绝对值的中位数。"""
+    buckets = {}
+    for t in scan["times"]:
+        night = int(math.floor(t))
+        buckets.setdefault(night, {"points": 0, "resid": []})
+        buckets[night]["points"] += 1
+    for i in res["keep"]:
+        t = scan["times"][i]
+        night = int(math.floor(t))
+        row = _design_row(t, res["f"], res["n_harm"])
+        model = sum(c * r for c, r in zip(res["coef"], row))
+        buckets[night]["resid"].append(abs((scan["mags"][i] - model) / scan["sigmas"][i]))
+    out = []
+    for night in sorted(buckets):
+        resid = buckets[night]["resid"]
+        out.append({"night": night, "points": buckets[night]["points"],
+                    "kept": len(resid),
+                    "resid_median_sigma": round(_median(resid), 3)})
+    return out
+
+
+def load_ledger(path):
+    """读夜间账本；读不出来、不是合法 JSON 或结构不合约定都当空账本。"""
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, ValueError):
         return []
-    if not isinstance(raw, dict) or raw.get("version") != 1:
+    if not (isinstance(raw, dict) and raw.get("format") == LEDGER_FORMAT):
         return []
-    entries = raw.get("entries")
-    if not isinstance(entries, list):
+    nights = raw.get("nights")
+    if not isinstance(nights, list):
         return []
     out = []
-    for e in entries:
-        if isinstance(e, dict) and isinstance(e.get("key"), str) and isinstance(e.get("report"), dict):
-            out.append({"key": e["key"], "report": e["report"]})
+    for e in nights:
+        if not isinstance(e, dict):
+            continue
+        night = e.get("night")
+        points = e.get("points")
+        kept = e.get("kept")
+        med = e.get("resid_median_sigma")
+        if not isinstance(night, int) or isinstance(night, bool):
+            continue
+        if not isinstance(points, int) or isinstance(points, bool):
+            continue
+        if not isinstance(kept, int) or isinstance(kept, bool):
+            continue
+        if not isinstance(med, (int, float)) or isinstance(med, bool):
+            continue
+        out.append({"night": night, "points": points, "kept": kept,
+                    "resid_median_sigma": round(float(med), 3)})
     return out
 
 
-def record_key(path):
-    import hashlib
-    with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+def merge_ledger(old, new):
+    """同夜号整条替换，按夜号升序排，最多留 LEDGER_LIMIT 夜（超出先丢夜号最小的）。"""
+    by_night = {}
+    for entry in old:
+        by_night[entry["night"]] = entry
+    for entry in new:
+        by_night[entry["night"]] = entry
+    merged = [by_night[night] for night in sorted(by_night)]
+    if len(merged) > LEDGER_LIMIT:
+        merged = merged[-LEDGER_LIMIT:]
+    return merged
 
 
-def save_cache(path, entries):
-    atomic_write(path, {"version": 1, "entries": entries})
+def save_ledger(path, entries):
+    atomic_write(path, {"format": LEDGER_FORMAT, "nights": entries})
 
 
 def atomic_write(path, obj):
@@ -328,44 +384,19 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="光变曲线周期搜索")
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--cache", default=None)
+    ap.add_argument("--ledger", default=None)
     args = ap.parse_args(argv)
 
-    try:
-        key = record_key(args.data)
-    except OSError:
-        _fail("读不到记录 %s" % args.data)
+    scan = load_data(args.data)
+    res = search_period(scan)
+    report = build_report(scan, res)
 
-    entries = load_cache(args.cache) if args.cache else []
-    report = None
-    for e in entries:
-        if e["key"] == key:
-            report = e["report"]
-            break
-
-    if report is None:
-        scan = load_data(args.data)
-        res = search_period(scan)
-        report = build_report(scan, res)
-
-    if args.cache:
-        hit = None
-        for i, e in enumerate(entries):
-            if e["key"] == key:
-                hit = i
-                break
-        entry = {"key": key, "report": report}
-        if hit is None:
-            entries = entries + [entry]
-            if len(entries) > CACHE_LIMIT:
-                entries = entries[-CACHE_LIMIT:]
-        else:
-            entries = entries[:]
-            entries[hit] = entry
+    if args.ledger:
+        entries = merge_ledger(load_ledger(args.ledger), night_stats(scan, res))
         try:
-            save_cache(args.cache, entries)
+            save_ledger(args.ledger, entries)
         except OSError:
-            _fail("缓存写不进去：%s" % args.cache)
+            _fail("账本写不进去：%s" % args.ledger)
 
     try:
         atomic_write(args.out, report)
