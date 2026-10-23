@@ -14,6 +14,7 @@
     （最多 max_clip_iter 轮）；最后在最优频率 ±df 内用黄金分割细化；
   · epoch_days 是基波极大时刻（落在 [0, P)），amplitude_mmag 是基波半振幅；
   · dof = n_used - 7，reduced_chi2 = chi2 / dof；
+  · 复核缓存按记录字节的 sha256 命中复用，未命中追加；缓存最多 32 条，超出先丢最早的；
   · 输出先写临时文件再原子替换；非法输入以退出码 2 结束且不落文件。
 """
 from __future__ import annotations
@@ -26,6 +27,7 @@ import sys
 import tempfile
 
 EXIT_INVALID = 2
+CACHE_LIMIT = 32
 TWO_PI = 2.0 * math.pi
 
 
@@ -355,6 +357,8 @@ def main(argv=None):
         entry = {"key": key, "report": report}
         if hit is None:
             entries = entries + [entry]
+            if len(entries) > CACHE_LIMIT:
+                entries = entries[-CACHE_LIMIT:]
         else:
             entries = entries[:]
             entries[hit] = entry
